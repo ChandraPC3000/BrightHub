@@ -92,7 +92,13 @@ def run_statistical_analysis(file_upload, sheet_name, target_column, train_ratio
 # 2. STREAMLIT INTERFACE DEPLOYMENT (FRONT-END ENGINE)
 # ==============================================================================
 
-st.set_page_index = "MS" # Set internal freq context
+# REVISI: Mengganti st.set_page_index yang salah menjadi fungsi bawaan resmi Streamlit
+st.set_page_config(
+    page_title="The Data Statesman Dashboard",
+    page_icon="💡",
+    layout="wide"
+)
+
 st.title("💡 The Data Statesman: 360° Business Intelligence Dashboard")
 st.caption("Samchan Tech Production // Powered by Data, Big Data & AI for Indonesia 2045")
 
@@ -107,7 +113,7 @@ with tab1:
     st.markdown("---")
     
     # Sidebar Control Area untuk User File Input
-    st.sidebar.header("📁 Control Panel Panel Data Input")
+    st.sidebar.header("📁 Control Panel Data Input")
     uploaded_file = st.sidebar.file_uploader("Upload Dataset Excel Retail (Bright Store)", type=["xlsx"])
     
     if uploaded_file is not None:
@@ -135,7 +141,8 @@ with tab1:
         
         fig, ax = plt.subplots(figsize=(15, 7))
         # Menggunakan palet warna Korporasi Pertamina (Biru, Hijau, Oranye)
-        ax.plot(res['rev_forecast'].index, res['rev_forecast'].values / 1e6, label='Projected Revenue (Top Line)', color='#1c3d5a', linewidth=2.5)
+        # REVISI: Label chart dinamis mengikuti parameter target (target_col) yang dipilih di sidebar
+        ax.plot(res['rev_forecast'].index, res['rev_forecast'].values / 1e6, label=f'Projected {target_col} (Top Line)', color='#1c3d5a', linewidth=2.5)
         ax.plot(res['ebitda_forecast'].index, res['ebitda_forecast'].values / 1e6, label='Projected EBITDA', color='#27ae60', linestyle='--')
         ax.plot(res['eat_forecast'].index, res['eat_forecast'].values / 1e6, label='Projected EAT (Laba Bersih)', color='#d35400', linewidth=2.5)
         
@@ -159,8 +166,8 @@ with tab1:
         risk_exposure = ((res['eat_forecast'].iloc[-1] - f_worst) / res['eat_forecast'].iloc[-1]) * 100
         
         report_text = f"""
-        1. ANALISIS REVENUE & PERTUMBUHAN:
-           Berdasarkan uji stasioneritas ADF (p-value: {res['p_value']:.4f}), data terbukti memiliki tren kuat sehingga sistem secara otomatis mengaktifkan parameter Differencing (d=1). Hasilnya, revenue diproyeksikan tumbuh {res['growth_pct']:.2f}% secara realistis dan siklikal (mengikuti pola ramai-sepi musiman, tidak naik lurus/manis).
+        1. ANALISIS PARAMETER TARGET & PERTUMBUHAN:
+           Berdasarkan uji stasioneritas ADF (p-value: {res['p_value']:.4f}), data terbukti memiliki tren kuat sehingga sistem secara otomatis mengaktifkan parameter Differencing (d=1). Hasilnya, proyeksi {target_col} tumbuh {res['growth_pct']:.2f}% secara realistis dan siklikal (mengikuti pola ramai-sepi musiman, tidak naik lurus/manis).
         
         2. STRUKTUR LABA & EFISIENSI OPERASIONAL:
            Rata-rata Margin Laba Bersih (EAT) dikunci pada angka {res['historical_eat_margin']*100:.2f}%. Pada akhir periode proyeksi, outlet diperkirakan mampu menghasilkan Laba Bersih ideal hingga Rp {res['eat_forecast'].iloc[-1]/1e6:,.2f} Juta per bulan, dengan catatan rasio pengeluaran tetap terkendali.
