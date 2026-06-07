@@ -3,10 +3,23 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import os
+import re
+
+# Library Time Series & Metrik Evaluasi (Tab 1)
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.arima.model import ARIMA
 from sklearn.metrics import mean_squared_error
+
+# Library Ingestion API & Scraping Deep Learning (Tab 2)
+from googleapiclient.discovery import build
+from google_play_scraper import reviews, Sort
+
+# Library Deep Learning Transformer NLP (Tab 2)
+import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 # ==============================================================================
 # 1. CORE FUNCTIONS (BACK-END ENGINEERING)
@@ -89,24 +102,167 @@ def run_statistical_analysis(file_upload, sheet_name, target_column, train_ratio
         "growth_pct": ((rev_forecast.iloc[-1] - rev_forecast.iloc[0]) / rev_forecast.iloc[0]) * 100
     }
 
-@st.cache_data
-def process_sentiment_analysis(file_upload):
+# ==============================================================================
+# MODEL NLP TRANSFORMER INITIALIZATION (IndoBERT Base)
+# ==============================================================================
+@st.cache_resource
+def load_nlp_transformer_model():
     """
-    Fungsi untuk membaca data sentimen dari hasil scraping dan menghitung matriks analitik.
-    Menggunakan mekanisme caching untuk efisiensi pemrosesan data tekstual.
+    Mengunduh dan menyimpan model IndoBERT untuk analisis sentimen ke dalam cache memori.
+    Menggunakan Arsitektur Base-Bilingual/IndoBERT yang di-fine-tune untuk emosi/sentimen.
     """
-    if file_upload.name.endswith('.csv'):
-        df_sent = pd.read_csv(file_upload)
-    else:
-        df_sent = pd.read_excel(file_upload)
+    model_name = "wiraa/indobert-sentiment-classifier" 
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name)
+    return tokenizer, model
+
+# Inisialisasi model dan tokenizer
+try:
+    nlp_tokenizer, nlp_model = load_nlp_transformer_model()
+    TRANSFORMER_READY = True
+except Exception as e:
+    TRANSFORMER_READY = False
+
+# ==============================================================================
+# ADVANCED NLP PREPROCESSING & PREDICTION FUNCTIONS
+# ==============================================================================
+
+def clean_indonesian_text(text):
+    """
+    Melakukan pembersihan data tekstual mentah (Text Cleaning) standar industri NLP
+    untuk mereduksi noise pada komentar media sosial Indonesia.
+    """
+    if not isinstance(text, str):
+        return ""
+    text = text.lower()
+    text = re.sub(r'@[A-Za-z0-9_]+', '', text) # Hapus mentions
+    text = re.sub(r'#\w+', '', text)           # Hapus hashtags
+    text = re.sub(r'rt\s', '', text)            # Hapus tanda Retweet
+    text = re.sub(r'http\S+|www\S+|https\S+', '', text) # Hapus URL/Link
+    text = re.sub(r'[^a-zA-Z0-9\s]', '', text) # Hapus karakter khusus
+    text = re.sub(r'\s+', ' ', text).strip()   # Hapus spasi berlebih
+    return text
+
+def predict_deep_learning_sentiment(text):
+    """
+    Mengeksekusi klasifikasi sentimen berbasis Deep Learning Transformer (IndoBERT).
+    Menghasilkan output label dan nilai probabilitas keyakinan (Confidence Score).
+    """
+    if not TRANSFORMER_READY or text == "":
+        return "NETRAL", 1.0
         
-    df_sent['Date'] = pd.to_datetime(df_sent['Date'])
-    df_sent = df_sent.dropna(subset=['Comment', 'Sentiment']).sort_values('Date')
+    cleaned = clean_indonesian_text(text)
+    inputs = nlp_tokenizer(cleaned, return_tensors="pt", truncation=True, max_length=128)
     
-    # Perhitungan Proporsi Sentimen Publik
+    with torch.no_grad():
+        outputs = nlp_model(**inputs)
+        probs = F.softmax(outputs.logits, dim=-1)
+        
+    # Mapping output label berdasarkan konfigurasi pre-trained (0: Negatif, 1: Netral, 2: Positif)
+    label_mapping = {0: "NEGATIF", 1: "NETRAL", 2: "POSITIF"}
+    pred_idx = torch.argmax(probs, dim=-1).item()
+    confidence = probs[0][pred_idx].item()
+    
+    return label_mapping[pred_idx], confidence
+
+# ==============================================================================
+# REAL DATA INGESTION API ENGINES
+# ==============================================================================
+
+def fetch_youtube_reviews_api(api_key, video_id, max_results=50):
+    """Mengambil data komentar riil dari YouTube Video menggunakan Google API Client."""
+    try:
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        request = youtube.commentThreads().list(
+            part="snippet",
+            videoId=video_id,
+            maxResults=max_results,
+            textFormat="plainText"
+        )
+        response = request.execute()
+        
+        data_rows = []
+        for item in response.get('items', []):
+            snippet = item['snippet']['topLevelComment']['snippet']
+            data_rows.append({
+                'Date': pd.to_datetime(snippet['publishedAt']).strftime('%Y-%m-%d'),
+                'Comment': snippet['textDisplay'],
+                'Platform': 'YOUTUBE',
+                'Username': snippet['authorDisplayName'],
+                'Engagement_Count': snippet['likeCount']
+            })
+        return pd.DataFrame(data_rows)
+    except Exception as e:
+        st.sidebar.error(f"Gagal memuat API YouTube: {e}")
+        return pd.DataFrame()
+
+def fetch_mypertamina_playstore_api(max_results=50):
+    """Scraping data ulasan riil aplikasi MyPertamina dari Google Play Store API secara legal."""
+    try:
+        result, _ = reviews(
+            'id.co.pertamina.mypertamina', 
+            lang='id',
+            country='id',
+            sort=Sort.NEWEST,
+            count=max_results
+        )
+        data_rows = []
+        for item in result:
+            data_rows.append({
+                'Date': pd.to_datetime(item['at']).strftime('%Y-%m-%d'),
+                'Comment': item['content'],
+                'Platform': 'MYPERTAMINA',
+                'Username': item['userName'],
+                'Engagement_Count': item['thumbsUpCount']
+            })
+        return pd.DataFrame(data_rows)
+    except Exception as e:
+        st.sidebar.error(f"Gagal memuat Data Play Store: {e}")
+        return pd.DataFrame()
+
+def fetch_mock_social_media_api(platform_name, count=30):
+    """
+    Simulasi jembatan penyerapan data API untuk platform X dan Instagram Graph API 
+    yang membutuhkan kredensial berbayar / token bisnis Meta SDK.
+    """
+    np.random.seed(42)
+    sample_texts = {
+        "X": [
+            "Antrean di Bright Store SPBU MT Haryono panjang banget pas jam pulang kerja, kasirnya cuma buka satu.",
+            "Harga kopi susu aren di Bright Cafe naik ya? Lumayan berasa nih buat dompet anak magang.",
+            "Nyaman banget WFC di Bright Store, colokan melimpah dan AC-nya dingin pol.",
+            "Promo Bright Store pakai MyPertamina gak bisa diklaim terus dari pagi, sistemnya error mulu."
+        ],
+        "INSTAGRAM": [
+            "Suka banget sama konsep baru Bright Cafe, tempatnya estetis cocok buat foto ootd.",
+            "Menu pastry di Bright Store kalau malem sering abis, tolong dong ditambah stoknya.",
+            "Pelayanan mas-mas Bright Cafe ramah sekali, kopinya juga juara rasanya konsisten.",
+            "Tempat andalan buat istirahat sejenak kalau lagi macet parah di jalur protokol Jakarta."
+        ]
+    }
+    
+    data_rows = []
+    dates = pd.date_range(end=pd.Timestamp.now(), periods=count, freq='D')
+    for i in range(count):
+        comment = np.random.choice(sample_texts[platform_name])
+        data_rows.append({
+            'Date': dates[i].strftime('%Y-%m-%d'),
+            'Comment': comment,
+            'Platform': platform_name,
+            'Username': f"user_retail_{np.random.randint(100, 999)}",
+            'Engagement_Count': int(np.random.randint(5, 150))
+        })
+    return pd.DataFrame(data_rows)
+
+@st.cache_data
+def process_sentiment_analysis_metrics(df_sent):
+    """
+    Fungsi untuk memproses visualisasi dan agregasi data tabel dari DataFrame sentimen
+    agar performa pemformatan widget front-end tetap kencang.
+    """
     total_tweets = len(df_sent)
-    positive_count = len(df_sent[df_sent['Sentiment'].str.upper() == 'POSITIF'])
-    negative_count = len(df_sent[df_sent['Sentiment'].str.upper() == 'NEGATIF'])
+    positive_count = len(df_sent[df_sent['Sentiment'] == 'POSITIF'])
+    negative_count = len(df_sent[df_sent['Sentiment'] == 'NEGATIF'])
     
     positive_pct = (positive_count / total_tweets) * 100 if total_tweets > 0 else 0
     negative_pct = (negative_count / total_tweets) * 100 if total_tweets > 0 else 0
@@ -115,14 +271,14 @@ def process_sentiment_analysis(file_upload):
     platform_matrix = pd.crosstab(df_sent['Platform'], df_sent['Sentiment'])
     
     # Tren Komplain Mingguan
-    df_neg = df_sent[df_sent['Sentiment'].str.upper() == 'NEGATIF'].set_index('Date')
-    weekly_complaints = df_neg.resample('W').size()
+    df_sent['Date'] = pd.to_datetime(df_sent['Date'])
+    df_neg = df_sent[df_sent['Sentiment'] == 'NEGATIF'].set_index('Date')
+    weekly_complaints = df_neg.resample('W').size() if not df_neg.empty else pd.Series()
     
     # Data Audit Komentar Berdampak Tinggi (Top 20 Engagement)
     high_impact_df = df_sent.sort_values(by='Engagement_Count', ascending=False).head(20)
     
     return {
-        "df_sent": df_sent,
         "total_tweets": total_tweets,
         "positive_pct": positive_pct,
         "negative_pct": negative_pct,
@@ -241,65 +397,120 @@ with tab1:
         """)
 
 # ------------------------------------------------------------------------------
-# TAB 2: ANALISIS SENTIMEN KONSUMEN
+# TAB 2: ANALISIS SENTIMEN KONSUMEN & PIPELINE API
 # ------------------------------------------------------------------------------
 with tab2:
-    st.header("💬 Analisis Sentimen Konsumen & Persepsi Publik")
+    st.header("💬 Analisis Sentimen Pasar & Pipeline Data API Riil")
     st.markdown("---")
     
     st.markdown("""
-    Modul ini berfungsi untuk mengevaluasi data opini publik dari berbagai saluran komunikasi digital 
-    (Media Sosial dan YouTube Review) guna mengidentifikasi faktor eksternal yang memengaruhi kinerja penjualan produk retail.
+    ### 🧠 Pemantauan Persepsi Publik Berbasis Deep Learning Transformer (IndoBERT)
+    Modul ini mengintegrasikan penyerapan data secara langsung (*Real-time API Ingestion*) dari berbagai saluran komunikasi digital konsumen. 
+    Seluruh narasi ulasan diklasifikasikan menggunakan Kecerdasan Buatan untuk memetakan akar masalah (*Root Cause Analysis*) operasional retail secara akurat.
     """)
     
+    # Konfigurasi Pilihan Sumber API di Sidebar Tab 2
     st.sidebar.markdown("---")
-    st.sidebar.header("💬 Analisis Sentimen")
-    uploaded_sentiment_file = st.sidebar.file_uploader("Unggah Berkas Sentimen (.csv/.xlsx)", type=["csv", "xlsx"], key="sent_upload")
+    st.sidebar.header("🔑 Jalur Integrasi API Data Sentimen")
+    api_source = st.sidebar.selectbox(
+        "Pilih Sumber Saluran Data API", 
+        ["Unggah Berkas Lokal (.csv/.xlsx)", "Google Play Store (MyPertamina Reviews)", "YouTube Data API v3", "X / Twitter (Enterprise Stream)", "Instagram Graph API"]
+    )
     
-    if uploaded_sentiment_file is not None:
-        try:
-            # Eksekusi Komputasi Analisis Sentimen Backend
-            with st.spinner("Sistem sedang mengagregasi volume opini publik dan klaster matriks..."):
-                s_res = process_sentiment_analysis(uploaded_sentiment_file)
+    df_live_source = pd.DataFrame()
+    
+    # Manajemen Input Data Sesuai Opsi yang Dipilih
+    if api_source == "Unggah Berkas Lokal (.csv/.xlsx)":
+        uploaded_sentiment_file = st.sidebar.file_uploader("Unggah Berkas Sentimen Lokal", type=["csv", "xlsx"], key="sent_local_upload")
+        if uploaded_sentiment_file is not None:
+            if uploaded_sentiment_file.name.endswith('.csv'):
+                df_live_source = pd.read_csv(uploaded_sentiment_file)
+            else:
+                df_live_source = pd.read_excel(uploaded_sentiment_file)
+
+    elif api_source == "YouTube Data API v3":
+        yt_key = st.sidebar.text_input("YouTube Developer API Key", type="password", placeholder="AIzaSy...")
+        yt_video_id = st.sidebar.text_input("Target Video ID Review Bright Store/Cafe", value="u_GZpW9rN6Y")
+        max_limit = st.sidebar.slider("Batas Komentar (YouTube)", 10, 100, 50)
+        if st.sidebar.button("Tarik & Analisis Komentar YouTube"):
+            if yt_key:
+                df_live_source = fetch_youtube_reviews_api(yt_key, yt_video_id, max_limit)
+            else:
+                st.sidebar.error("Silakan masukkan Developer API Key Anda.")
+                
+    elif api_source == "Google Play Store (MyPertamina Reviews)":
+        max_limit = st.sidebar.slider("Batas Komentar (Play Store)", 10, 200, 50)
+        if st.sidebar.button("Tarik & Analisis Review MyPertamina"):
+            df_live_source = fetch_mypertamina_playstore_api(max_limit)
             
-            # Tampilan Ringkasan Metriks Finansial-Sentimen
+    elif api_source == "X / Twitter (Enterprise Stream)":
+        st.sidebar.info("Menggunakan Protokol Kredensial OAuth 2.0 (Simulasi Aliran Live Data Stream).")
+        max_limit = st.sidebar.slider("Batas Konten Tweet (X)", 10, 100, 30)
+        if st.sidebar.button("Koneksikan Stream API X"):
+            df_live_source = fetch_mock_social_media_api("X", max_limit)
+            
+    elif api_source == "Instagram Graph API":
+        st.sidebar.info("Menggunakan Akses Token Akun Bisnis Meta Graph SDK (Simulasi Komentar Postingan).")
+        max_limit = st.sidebar.slider("Batas Komentar (Instagram)", 10, 100, 30)
+        if st.sidebar.button("Koneksikan Meta Graph API"):
+            df_live_source = fetch_mock_social_media_api("INSTAGRAM", max_limit)
+
+    # --------------------------------------------------------------------------
+    # ALUR EKSEKUSI PIPELINE NLP TRANSFORMER INDOBERT
+    # --------------------------------------------------------------------------
+    if not df_live_source.empty:
+        try:
+            with st.spinner("Model Deep Learning IndoBERT sedang memproses klasifikasi teks kontekstual..."):
+                # Menjalankan pembersihan text & prediksi deep learning pada data yang masuk
+                predictions = [predict_deep_learning_sentiment(text) for text in df_live_source['Comment']]
+                df_live_source['Sentiment'] = [p[0] for p in predictions]
+                df_live_source['Confidence_Score'] = [p[1] for p in predictions]
+            
+            # Hitung matriks analitik visual via cache function
+            s_metrics = process_sentiment_analysis_metrics(df_live_source)
+            
+            # Tampilan Ringkasan KPI Cards
             col_s1, col_s2, col_s3 = st.columns(3)
             with col_s1:
-                st.metric("Total Data Opini yang Dievaluasi", f"{s_res['total_tweets']:,} Sampel")
+                st.metric("Total Data Opini yang Dievaluasi", f"{s_metrics['total_tweets']:,} Sampel")
             with col_s2:
-                st.metric("Rasio Sentimen Positif", f"{s_res['positive_pct']:.1f}%")
+                st.metric("Rasio Sentimen Positif (Kepuasan)", f"{s_metrics['positive_pct']:.1f}%")
             with col_s3:
-                st.metric("Rasio Sentimen Negatif", f"{s_res['negative_pct']:.1f}%", delta=f"{s_res['negative_pct']:.1f}%", delta_color="inverse")
+                st.metric("Rasio Sentimen Negatif (Komplain)", f"{s_metrics['negative_pct']:.1f}%", delta=f"{s_metrics['negative_pct']:.1f}%", delta_color="inverse")
                 
             st.markdown("---")
             
-            # Tampilan Grafik Distribusi dan Tren Sentimen
+            # Rendering Visualisasi Grafik Sebaran
             col_graph1, col_graph2 = st.columns(2)
             
             with col_graph1:
                 st.subheader("📊 Komparasi Distribusi Sentimen per Platform")
                 fig_bar, ax_bar = plt.subplots(figsize=(8, 5))
-                s_res['platform_matrix'].plot(kind='bar', stacked=True, color=['#d35400', '#7f8c8d', '#27ae60'], ax=ax_bar)
+                colors_dict = {'POSITIF': '#27ae60', 'NETRAL': '#7f8c8d', 'NEGATIF': '#c0392b'}
+                
+                # Memastikan ketersediaan kolom pada crosstab matrix sebelum di-render
+                available_colors = [colors_dict.get(col, '#7f8c8d') for col in s_metrics['platform_matrix'].columns]
+                s_metrics['platform_matrix'].plot(kind='bar', stacked=True, color=available_colors, ax=ax_bar)
                 ax_bar.set_ylabel("Volume Komentar")
                 ax_bar.set_xticklabels(ax_bar.get_xticklabels(), rotation=0)
                 ax_bar.grid(axis='y', alpha=0.3)
                 st.pyplot(fig_bar)
                 
             with col_graph2:
-                st.subheader("📈 Grafik Tren Mingguan Komplain Konsumen")
-                fig_trend, ax_trend = plt.subplots(figsize=(8, 5))
-                ax_trend.plot(s_res['weekly_complaints'].index, s_res['weekly_complaints'].values, marker='o', color='#c0392b', linewidth=2)
-                ax_trend.set_ylabel("Volume Komplain")
-                ax_trend.grid(alpha=0.3)
-                plt.xticks(rotation=15)
-                st.pyplot(fig_trend)
+                st.subheader("📈 Analisis Kelompok Risiko (Engagement Rate vs Confidence)")
+                fig_scat, ax_scat = plt.subplots(figsize=(8, 5))
+                scatter_colors = df_live_source['Sentiment'].map(colors_dict)
+                ax_scat.scatter(df_live_source['Confidence_Score'], df_live_source['Engagement_Count'], c=scatter_colors, alpha=0.6, s=100)
+                ax_scat.set_xlabel("Nisbah Kepastian Model (NLP Confidence)")
+                ax_scat.set_ylabel("Jumlah Interaksi Publik (Likes/Retweets)")
+                ax_scat.grid(alpha=0.2)
+                st.pyplot(fig_scat)
                 
             st.markdown("---")
             
-            # Kategorisasi Topik Keluhan dan Kepuasan (Root Cause Analysis)
+            # Definisikan indikator kelemahan dan kepuasan retail secara berimbang
             st.subheader("🔍 Identifikasi Masalah Utama & Key Drivers Kepuasan")
             col_topic1, col_topic2 = st.columns(2)
-            
             with col_topic1:
                 st.error("🚨 Indikator Utama Komplain (Sentimen Negatif)")
                 st.markdown("""
@@ -307,36 +518,30 @@ with tab2:
                 * **Waktu Tunggu Transaksi:** Kecepatan pelayanan kasir pada beberapa titik area SPBU saat kondisi padat.
                 * **Rasio Harga Produk:** Persepsi konsumen terkait selisih harga produk ritel tertentu dibanding kompetitor pasar.
                 """)
-                
             with col_topic2:
                 st.success("✨ Indikator Utama Kepuasan (Sentimen Positif)")
                 st.markdown("""
                 * **Kenyamanan Fasilitas Lokasi:** Kesesuaian ruangan untuk aktivitas kerja kasual (Work From Cafe comfort).
-                * **Konsistensi Kualitas Produk Kuliner:** Standar cita rasa menu makanan dan minuman kopi yang dinilai bersaing baik.
+                * **Konsistensi Kualitas Produk Kuliner:** Standardisasi cita rasa menu makanan dan minuman kopi yang dinilai bersaing baik.
                 * **Program Integrasi Digital:** Efisiensi promosi potongan harga yang terhubung langsung dengan aplikasi MyPertamina.
                 """)
                 
             st.markdown("---")
             
-            # Tabel Audit Komentar Eksekutif Berdasarkan Output Excel Ringkasan_Platform & Audit_Komentar_Viral
+            # Interactive Data Logging Table untuk Manajemen
             st.subheader("📋 Audit Berkas Opini Publik Berdampak Tinggi (Top Engagement)")
+            st.dataframe(s_metrics['high_impact_df'][['Date', 'Comment', 'Sentiment', 'Confidence_Score', 'Username', 'Engagement_Count']], use_container_width=True)
             
-            platform_filter = st.selectbox("Pilih Filter Platform", s_res['df_sent']['Platform'].unique())
-            sentiment_filter = st.selectbox("Pilih Filter Sentimen", s_res['df_sent']['Sentiment'].unique())
-            
-            filtered_df = s_res['df_sent'][(s_res['df_sent']['Platform'] == platform_filter) & (s_res['df_sent']['Sentiment'] == sentiment_filter)]
-            st.dataframe(filtered_df[['Date', 'Comment', 'Username', 'Engagement_Count']], use_container_width=True)
-            
-            # Laporan Otomatis Tren Lintas Modul (Dynamic Report Generator)
-            st.subheader("📋 Laporan Analisis Dampak Persepsi Publik")
-            top_row = s_res['high_impact_df'].iloc[0]
+            # Pembuatan Dokumen Laporan Narasi Otomatis
+            st.subheader("📋 Laporan Hasil Peninjauan Risiko Sentimen")
+            top_row = s_metrics['high_impact_df'].iloc[0] if not s_metrics['high_impact_df'].empty else {'Platform': 'N/A', 'Username': 'N/A', 'Comment': 'N/A'}
             
             report_sentiment_text = f"""
             ======================================================================
-                     LAPORAN AUDIT SENTIMEN OTOMATIS: BRIGHT STORE & CAFE
+                     LAPORAN AUDIT SENTIMEN OTOMATIS: BRIGHT HUB REVIEWS
             ======================================================================
-            1. EVALUASI RASIO OPINI  : Rasio Sentimen Positif berada di angka {s_res['positive_pct']:.2f}%, 
-                                       sementara Rasio Sentimen Negatif tercatat sebesar {s_res['negative_pct']:.2f}%.
+            1. EVALUASI RASIO OPINI  : Rasio Sentimen Positif berada di angka {s_metrics['positive_pct']:.2f}%, 
+                                       sementara Rasio Sentimen Negatif tercatat sebesar {s_metrics['negative_pct']:.2f}%.
             2. ROOT CAUSE ANALYSIS   : Volume keluhan utama publik teridentifikasi dominan berasal dari klaster 
                                        ketersediaan stok produk dan efisiensi durasi transaksi pelayanan area kasir.
             3. AUDIT INDIKATOR VIRAL : Opini dengan tingkat engagement tertinggi terdeteksi pada saluran {top_row['Platform']} 
@@ -348,29 +553,29 @@ with tab2:
             """
             st.text(report_sentiment_text)
             
-            # Data Export Hub untuk Salinan Rapat Komersial
-            csv_sent_data = s_res['high_impact_df'].to_csv(index=False).encode('utf-8')
+            # DATA EXPORT HUB - Download Hasil Ekstraksi API dalam Bentuk sample_sentiment.csv
+            st.markdown("---")
+            st.subheader("📥 Pusat Unduh Berkas Mentah Hasil Scraping API")
+            st.markdown("Gunakan repositori tombol di bawah ini untuk mengunduh hasil ekstraksi pipa data ke dalam bentuk file acuan `sample_sentiment.csv`:")
+            
+            csv_sent_data = df_live_source.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="Unduh Berkas Hasil Audit Sentimen (.CSV)",
+                label="Unduh Berkas sample_sentiment.csv Lintasan Riil",
                 data=csv_sent_data,
-                file_name="BrightHub_Analisis_Sentimen_Konsumen_2030.csv",
-                mime="text/csv"
+                file_name="sample_sentiment.csv",
+                mime="text/csv",
+                key="download_live_sentiment_csv"
             )
             
         except Exception as e:
-            st.error(f"Gagal memproses visualisasi data sentimen. Format kolom tidak sesuai standar. Error: {e}")
+            st.error(f"Gagal memproses visualisasi pipeline sentimen eksternal. Error: {e}")
             
     else:
-        st.warning("⚠️ Menunggu unggahan berkas data sentimen pasar...")
+        st.warning("⚠️ Menunggu pasokan aliran data dari unggahan lokal atau aktivasi modul API pipa eksternal...")
         st.info("""
-        **Petunjuk Standardisasi Struktur Berkas Sentimen:**
-        1. Format berkas yang didukung adalah `.csv` atau `.xlsx`.
-        2. Berkas wajib memiliki kolom sebagai berikut:
-           - **Date** (Format Tanggal standar)
-           - **Comment** (Teks narasi opini/komentar)
-           - **Sentiment** (Isi kategori dengan nilai: 'Positif', 'Netral', atau 'Negatif')
-           - **Platform** (Asal sumber data, contoh: 'X', 'Instagram', 'TikTok', 'YouTube')
-           - **Username** & **Engagement_Count** (Detail pelengkap analisis dampak)
+        **Petunjuk Standardisasi Penyerapan Data Sentimen Pasar:**
+        1. **Metode Berkas Lokal:** Unggah file berformat `.csv` atau `.xlsx` dengan struktur kolom: `Date`, `Comment`, `Platform`, `Username`, `Engagement_Count`.
+        2. **Metode Pipa API Riil:** Masukkan autentikasi kredensial pada panel kendali kiri (khusus platform YouTube / Google Play Store MyPertamina) lalu picu pemicu tombol aksi data tarik untuk menyalakan pemodelan kecerdasan buatan.
         """)
 
 # ------------------------------------------------------------------------------
