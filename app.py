@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.arima.model import ARIMA
@@ -17,7 +18,7 @@ def calculate_mape(actual, forecast):
 @st.cache_data
 def run_statistical_analysis(file_upload, sheet_name, target_column, train_ratio):
     """
-    Fungsi untuk membaca data, menjalankan pengujian backtesting, dan forecasting.
+    Fungsi untuk membaca data keuangan, menjalankan pengujian backtesting, dan forecasting.
     Menggunakan mekanisme caching agar performa dashboard tetap optimal saat interaksi user.
     """
     # 1. Data Preparation
@@ -88,6 +89,48 @@ def run_statistical_analysis(file_upload, sheet_name, target_column, train_ratio
         "growth_pct": ((rev_forecast.iloc[-1] - rev_forecast.iloc[0]) / rev_forecast.iloc[0]) * 100
     }
 
+@st.cache_data
+def process_sentiment_analysis(file_upload):
+    """
+    Fungsi untuk membaca data sentimen dari hasil scraping dan menghitung matriks analitik.
+    Menggunakan mekanisme caching untuk efisiensi pemrosesan data tekstual.
+    """
+    if file_upload.name.endswith('.csv'):
+        df_sent = pd.read_csv(file_upload)
+    else:
+        df_sent = pd.read_excel(file_upload)
+        
+    df_sent['Date'] = pd.to_datetime(df_sent['Date'])
+    df_sent = df_sent.dropna(subset=['Comment', 'Sentiment']).sort_values('Date')
+    
+    # Perhitungan Proporsi Sentimen Publik
+    total_tweets = len(df_sent)
+    positive_count = len(df_sent[df_sent['Sentiment'].str.upper() == 'POSITIF'])
+    negative_count = len(df_sent[df_sent['Sentiment'].str.upper() == 'NEGATIF'])
+    
+    positive_pct = (positive_count / total_tweets) * 100 if total_tweets > 0 else 0
+    negative_pct = (negative_count / total_tweets) * 100 if total_tweets > 0 else 0
+    
+    # Matrix Komparasi Platform vs Sentimen
+    platform_matrix = pd.crosstab(df_sent['Platform'], df_sent['Sentiment'])
+    
+    # Tren Komplain Mingguan
+    df_neg = df_sent[df_sent['Sentiment'].str.upper() == 'NEGATIF'].set_index('Date')
+    weekly_complaints = df_neg.resample('W').size()
+    
+    # Data Audit Komentar Berdampak Tinggi (Top 20 Engagement)
+    high_impact_df = df_sent.sort_values(by='Engagement_Count', ascending=False).head(20)
+    
+    return {
+        "df_sent": df_sent,
+        "total_tweets": total_tweets,
+        "positive_pct": positive_pct,
+        "negative_pct": negative_pct,
+        "platform_matrix": platform_matrix,
+        "weekly_complaints": weekly_complaints,
+        "high_impact_df": high_impact_df
+    }
+
 # ==============================================================================
 # 2. STREAMLIT INTERFACE DEPLOYMENT (FRONT-END ENGINE)
 # ==============================================================================
@@ -112,8 +155,8 @@ with tab1:
     st.markdown("---")
     
     # Panel Kontrol Pengunggahan Berkas di Sidebar
-    st.sidebar.header("📁 Pengaturan Data Input")
-    uploaded_file = st.sidebar.file_uploader("Unggah Laporan Keuangan Retail (Format .xlsx)", type=["xlsx"])
+    st.sidebar.header("📊 Analisis Finansial")
+    uploaded_file = st.sidebar.file_uploader("Unggah Laporan Keuangan Retail (.xlsx)", type=["xlsx"], key="fin_upload")
     
     if uploaded_file is not None:
         target_col = st.sidebar.selectbox("Pilih Parameter Target", ["Revenue", "Ebitda", "EAT"])
@@ -137,7 +180,7 @@ with tab1:
         # Visualisasi Grafik Proyeksi
         st.subheader("🔮 Tren Proyeksi Keuangan Terintegrasi (Periode 2026 - 2030)")
         
-        fig, ax = plt.subplots(figsize=(15, 7))
+        fig, ax = plt.subplots(figsize=(15, 6))
         ax.plot(res['rev_forecast'].index, res['rev_forecast'].values / 1e6, label=f'Proyeksi {target_col} (Top Line)', color='#1c3d5a', linewidth=2.5)
         ax.plot(res['ebitda_forecast'].index, res['ebitda_forecast'].values / 1e6, label='Proyeksi EBITDA', color='#27ae60', linestyle='--')
         ax.plot(res['eat_forecast'].index, res['eat_forecast'].values / 1e6, label='Proyeksi EAT (Laba Bersih)', color='#d35400', linewidth=2.5)
@@ -210,30 +253,23 @@ with tab2:
     """)
     
     st.sidebar.markdown("---")
-    st.sidebar.header("💬 Pengaturan Data Sentimen")
-    uploaded_sentiment_file = st.sidebar.file_uploader("Unggah Berkas Sentimen (.csv/.xlsx)", type=["csv", "xlsx"])
+    st.sidebar.header("💬 Analisis Sentimen")
+    uploaded_sentiment_file = st.sidebar.file_uploader("Unggah Berkas Sentimen (.csv/.xlsx)", type=["csv", "xlsx"], key="sent_upload")
     
     if uploaded_sentiment_file is not None:
         try:
-            if uploaded_sentiment_file.name.endswith('.csv'):
-                df_sent = pd.read_csv(uploaded_sentiment_file)
-            else:
-                df_sent = pd.read_excel(uploaded_sentiment_file)
-                
-            df_sent['Date'] = pd.to_datetime(df_sent['Date'])
+            # Eksekusi Komputasi Analisis Sentimen Backend
+            with st.spinner("Sistem sedang mengagregasi volume opini publik dan klaster matriks..."):
+                s_res = process_sentiment_analysis(uploaded_sentiment_file)
             
-            # Perhitungan Proporsi Sentimen Publik
-            total_tweets = len(df_sent)
-            positive_pct = (len(df_sent[df_sent['Sentiment'].str.upper() == 'POSITIF']) / total_tweets) * 100
-            negative_pct = (len(df_sent[df_sent['Sentiment'].str.upper() == 'NEGATIF']) / total_tweets) * 100
-            
+            # Tampilan Ringkasan Metriks Finansial-Sentimen
             col_s1, col_s2, col_s3 = st.columns(3)
             with col_s1:
-                st.metric("Total Data Opini yang Dievaluasi", f"{total_tweets:,} Sampel")
+                st.metric("Total Data Opini yang Dievaluasi", f"{s_res['total_tweets']:,} Sampel")
             with col_s2:
-                st.metric("Rasio Sentimen Positif", f"{positive_pct:.1f}%")
+                st.metric("Rasio Sentimen Positif", f"{s_res['positive_pct']:.1f}%")
             with col_s3:
-                st.metric("Rasio Sentimen Negatif", f"{negative_pct:.1f}%", delta=f"{negative_pct:.1f}%", delta_color="inverse")
+                st.metric("Rasio Sentimen Negatif", f"{s_res['negative_pct']:.1f}%", delta=f"{s_res['negative_pct']:.1f}%", delta_color="inverse")
                 
             st.markdown("---")
             
@@ -243,8 +279,7 @@ with tab2:
             with col_graph1:
                 st.subheader("📊 Komparasi Distribusi Sentimen per Platform")
                 fig_bar, ax_bar = plt.subplots(figsize=(8, 5))
-                platform_sent = pd.crosstab(df_sent['Platform'], df_sent['Sentiment'])
-                platform_sent.plot(kind='bar', stacked=True, color=['#d35400', '#7f8c8d', '#27ae60'], ax=ax_bar)
+                s_res['platform_matrix'].plot(kind='bar', stacked=True, color=['#d35400', '#7f8c8d', '#27ae60'], ax=ax_bar)
                 ax_bar.set_ylabel("Volume Komentar")
                 ax_bar.set_xticklabels(ax_bar.get_xticklabels(), rotation=0)
                 ax_bar.grid(axis='y', alpha=0.3)
@@ -253,12 +288,10 @@ with tab2:
             with col_graph2:
                 st.subheader("📈 Grafik Tren Mingguan Komplain Konsumen")
                 fig_trend, ax_trend = plt.subplots(figsize=(8, 5))
-                df_neg = df_sent[df_sent['Sentiment'].str.upper() == 'NEGATIF'].set_index('Date')
-                trend_data = df_neg.resample('W').size()
-                ax_trend.plot(trend_data.index, trend_data.values, marker='o', color='#c0392b', linewidth=2)
+                ax_trend.plot(s_res['weekly_complaints'].index, s_res['weekly_complaints'].values, marker='o', color='#c0392b', linewidth=2)
                 ax_trend.set_ylabel("Volume Komplain")
                 ax_trend.grid(alpha=0.3)
-                plt.xticks(rotation=45)
+                plt.xticks(rotation=15)
                 st.pyplot(fig_trend)
                 
             st.markdown("---")
@@ -270,28 +303,59 @@ with tab2:
             with col_topic1:
                 st.error("🚨 Indikator Utama Komplain (Sentimen Negatif)")
                 st.markdown("""
-                *   **Ketersediaan Stok Produk (Supply Chain):** Keterbatasan ketersediaan produk siap saji pada jam-jam sibuk.
-                *   **Waktu Tunggu Transaksi:** Kecepatan pelayanan kasir pada beberapa titik area SPBU saat kondisi padat.
-                *   **Rasio Harga Produk:** Persepsi konsumen terkait selisih harga produk ritel tertentu dibanding kompetitor pasar.
+                * **Ketersediaan Stok Produk (Supply Chain):** Keterbatasan ketersediaan produk siap saji pada jam-jam sibuk.
+                * **Waktu Tunggu Transaksi:** Kecepatan pelayanan kasir pada beberapa titik area SPBU saat kondisi padat.
+                * **Rasio Harga Produk:** Persepsi konsumen terkait selisih harga produk ritel tertentu dibanding kompetitor pasar.
                 """)
                 
             with col_topic2:
                 st.success("✨ Indikator Utama Kepuasan (Sentimen Positif)")
                 st.markdown("""
-                *   **Kenyamanan Fasilitas Lokasi:** Kesesuaian ruangan untuk aktivitas kerja kasual (Work From Cafe comfort).
-                *   **Konsistensi Kualitas Produk Kuliner:** Standar cita rasa menu makanan dan minuman kopi yang dinilai bersaing baik.
-                *   **Program Integrasi Digital:** Efisiensi promosi potongan harga yang terhubung langsung dengan aplikasi MyPertamina.
+                * **Kenyamanan Fasilitas Lokasi:** Kesesuaian ruangan untuk aktivitas kerja kasual (Work From Cafe comfort).
+                * **Konsistensi Kualitas Produk Kuliner:** Standar cita rasa menu makanan dan minuman kopi yang dinilai bersaing baik.
+                * **Program Integrasi Digital:** Efisiensi promosi potongan harga yang terhubung langsung dengan aplikasi MyPertamina.
                 """)
                 
             st.markdown("---")
             
-            # Tabel Audit Komentar untuk Peninjauan Manajemen Risiko
-            st.subheader("📋 Audit Berkas Opini Publik Berdampak Tinggi")
-            platform_filter = st.selectbox("Pilih Filter Platform", df_sent['Platform'].unique())
-            sentiment_filter = st.selectbox("Pilih Filter Sentimen", df_sent['Sentiment'].unique())
+            # Tabel Audit Komentar Eksekutif Berdasarkan Output Excel Ringkasan_Platform & Audit_Komentar_Viral
+            st.subheader("📋 Audit Berkas Opini Publik Berdampak Tinggi (Top Engagement)")
             
-            filtered_df = df_sent[(df_sent['Platform'] == platform_filter) & (df_sent['Sentiment'] == sentiment_filter)]
+            platform_filter = st.selectbox("Pilih Filter Platform", s_res['df_sent']['Platform'].unique())
+            sentiment_filter = st.selectbox("Pilih Filter Sentimen", s_res['df_sent']['Sentiment'].unique())
+            
+            filtered_df = s_res['df_sent'][(s_res['df_sent']['Platform'] == platform_filter) & (s_res['df_sent']['Sentiment'] == sentiment_filter)]
             st.dataframe(filtered_df[['Date', 'Comment', 'Username', 'Engagement_Count']], use_container_width=True)
+            
+            # Laporan Otomatis Tren Lintas Modul (Dynamic Report Generator)
+            st.subheader("📋 Laporan Analisis Dampak Persepsi Publik")
+            top_row = s_res['high_impact_df'].iloc[0]
+            
+            report_sentiment_text = f"""
+            ======================================================================
+                     LAPORAN AUDIT SENTIMEN OTOMATIS: BRIGHT STORE & CAFE
+            ======================================================================
+            1. EVALUASI RASIO OPINI  : Rasio Sentimen Positif berada di angka {s_res['positive_pct']:.2f}%, 
+                                       sementara Rasio Sentimen Negatif tercatat sebesar {s_res['negative_pct']:.2f}%.
+            2. ROOT CAUSE ANALYSIS   : Volume keluhan utama publik teridentifikasi dominan berasal dari klaster 
+                                       ketersediaan stok produk dan efisiensi durasi transaksi pelayanan area kasir.
+            3. AUDIT INDIKATOR VIRAL : Opini dengan tingkat engagement tertinggi terdeteksi pada saluran {top_row['Platform']} 
+                                       oleh akun @{top_row['Username']} dengan narasi komersial:
+                                       "{top_row['Comment']}"
+            4. REKOMENDASI MANAJEMEN : Diperlukan penyelarasan manajemen rantai pasok (supply chain) pada jam sibuk 
+                                       untuk memitigasi risiko penurunan kepuasan konsumen ritel.
+            ======================================================================
+            """
+            st.text(report_sentiment_text)
+            
+            # Data Export Hub untuk Salinan Rapat Komersial
+            csv_sent_data = s_res['high_impact_df'].to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Unduh Berkas Hasil Audit Sentimen (.CSV)",
+                data=csv_sent_data,
+                file_name="BrightHub_Analisis_Sentimen_Konsumen_2030.csv",
+                mime="text/csv"
+            )
             
         except Exception as e:
             st.error(f"Gagal memproses visualisasi data sentimen. Format kolom tidak sesuai standar. Error: {e}")
@@ -353,9 +417,9 @@ with tab3:
     with col_route1:
         st.markdown("""
         **Rencana Geografis Jalur Lintasan Lari:**
-        *   🏁 **Titik Start:** Kawasan Monumen Nasional (Monas)
-        *   📍 **Titik Check Point / Media Branding Utama:** Bundaran Hotel Indonesia (HI)
-        *   🏁 **Titik Finish & Area Utama Festival:** Kawasan Gelora Bung Karno (GBK)
+        * 🏁 **Titik Start:** Kawasan Monumen Nasional (Monas)
+        * 📍 **Titik Check Point / Media Branding Utama:** Bundaran Hotel Indonesia (HI)
+        * 🏁 **Titik Finish & Area Utama Festival:** Kawasan Gelora Bung Karno (GBK)
         
         **Strategi Distribusi Titik Komersial (Own Brand Touchpoints):**
         - *Water Station & Hydration Boost:* Penempatan produk konsumsi cepat saji yang dikelola eksklusif oleh jaringan *Bright Store* dan *Bright Cafe*.
@@ -411,8 +475,8 @@ with tab3:
     st.subheader("📋 Rekomendasi Manajerial Akhir")
     
     rekomendasi_narasi = f"""
-    *   **Korelasi Analisis Lintas Modul (360° Perspective):** Hasil evaluasi opini konsumen pada **Tab 2** menunjukkan adanya area perbaikan pada aspek *brand awareness* menu kuliner. Pendekatan pelaksanaan program olahraga massa pada **Tab 3** ini bertindak sebagai media akselerasi taktis guna menciptakan pengalaman langsung konsumen (*experiential marketing*) terhadap kualitas lini produk ritel baru kita di hadapan **{total_pelari:,} target sasaran**.
-    *   **Rencana Garis Waktu Eksekusi (Roadmap):** Tahapan pengajuan uji coba berskala terbatas (Skenario Aliansi) diusulkan untuk masuk dalam agenda perencanaan program triwulan berikutnya. Hal ini bertujuan sebagai media pengumpulan data performa valid yang akan digunakan untuk mendukung proses pengambilan keputusan strategis oleh jajaran direksi.
+    * **Korelasi Analisis Lintas Modul (360° Perspective):** Hasil evaluasi opini konsumen pada **Tab 2** menunjukkan adanya area perbaikan pada aspek *brand awareness* menu kuliner. Pendekatan pelaksanaan program olahraga massa pada **Tab 3** ini bertindak sebagai media akselerasi taktis guna menciptakan pengalaman langsung konsumen (*experiential marketing*) terhadap kualitas lini produk ritel baru kita di hadapan **{total_pelari:,} target sasaran**.
+    * **Rencana Garis Waktu Eksekusi (Roadmap):** Tahapan pengajuan uji coba berskala terbatas (Skenario Aliansi) diusulkan untuk masuk dalam agenda perencanaan program triwulan berikutnya. Hal ini bertujuan sebagai media pengumpulan data performa valid yang akan digunakan untuk mendukung proses pengambilan keputusan strategis oleh jajaran direksi.
     """
     st.markdown(rekomendasi_narasi)
     st.success("🎯 **STATUS EVALUASI:** Seluruh modul arsitektur Bright Hub Dashboard telah terintegrasi penuh. Sistem siap dipergunakan untuk mendukung proses presentasi manajerial.")
