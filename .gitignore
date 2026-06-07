@@ -1,0 +1,27 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python cache & compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Streamlit local configuration
+.streamlit/
+
+# Protected Corporate Data Files
+*.xlsx
+*.xls
+*.csv
+data/raw/*
+data/processed/*
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Output visualisasi lokal
+*.png
