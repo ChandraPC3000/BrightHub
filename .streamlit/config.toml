@@ -1,0 +1,11 @@
+[theme]
+primaryColor = "#1c3d5a"      # Biru gelap korporat
+backgroundColor = "#ffffff"  # Putih bersih
+secondaryBackgroundColor = "#f8fafc" # Abu-abu terang untuk sidebar
+textColor = "#1e293b"        # Hitam elegan untuk teks
+
+[browser]
+gatherUsageStats = false     # Mematikan pelacakan statistik internal
+
+[client]
+toolbarMode = "minimal"      # Menyembunyikan menu developer Streamlit dari user/direksi
